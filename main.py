@@ -1,11 +1,12 @@
-import requests, json, random, sys
-from PIL import Image, ImageQt
+import requests, json, random, sys, io, roman, re
+from PIL import Image
+from PIL.ImageQt import ImageQt
 from dotenv import load_dotenv
 from os import getenv
 from bs4 import BeautifulSoup
 from io import BytesIO
 from PyQt5.QtWidgets import QApplication, QMainWindow, QLabel, QWidget, QGridLayout, QPushButton, QLineEdit
-from PyQt5.QtGui import QIcon, QFont, QPixmap
+from PyQt5.QtGui import QIcon, QFont, QPixmap, QImage
 from PyQt5.QtCore import Qt
 
 """
@@ -24,7 +25,7 @@ class Player:
         elif not steam_id and DEFAULT_STEAM_ID is not None:
             steam_id = DEFAULT_STEAM_ID
         if len(steam_id) != 17 or not steam_id.isalnum():
-            raise ValueError(f"You've entered an invalid Steam ID.\nCheck the length and make sure it's alphanumeric.")
+            raise ValueError(f"You've entered an invalid Steam ID.\nCheck the length and make sure it's numeric.")
         steam_id = steam_id.upper()
 
         self.steam_id = steam_id
@@ -35,7 +36,11 @@ class Player:
     def get_player_name(self) -> str:
         player_info_url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={self.steam_id}&format=json"
         soup = BeautifulSoup(requests.get(player_info_url).text, "html.parser")
-        return json.loads(soup.text)['response']['players'][0]['personaname']
+        try:
+            return json.loads(soup.text)['response']['players'][0]['personaname']
+        except Exception:
+            raise ValueError("Could not talk to the Steam API. Is your key valid/correct?")
+
 
     def get_player_steam_games(self) -> list[int]:
         """Given a valid Steam ID, get all the games that the player has"""
@@ -46,8 +51,8 @@ class Player:
         try:
             data = json.loads(soup.text)['response']['games']
         except KeyError:
-            raise ValueError(f"You've entered an invalid Steam ID. Player ID does not exist.")
-        data_ids = [game['appid'] for game in data if game['playtime_forever'] > 30] # Grab game ideas, ignore unplayed games
+            raise ValueError(f"You've entered an invalid Steam ID. Player ID does not exist.") # Already tested for valid API in get_player_name
+        data_ids = [game['appid'] for game in data if game['playtime_forever'] > 15] # Grab game ideas, ignore unplayed games
         # print(json.dumps(data_ids, indent=3))
         return data_ids
 
@@ -61,9 +66,18 @@ class Player:
 class Screenshot:
     def __init__(self, game_id: int):
         self.game_id = game_id
-        self.game_name, self.screenshot = self.get_random_game_screenshot()
-        self.pixel_size = 25 # Starting pixelation
-        self.pixelated_screenshot = self.pixelate_image()
+        # Keep trying to get the name and normal_screenshot. Don't leave until you do.
+        while True:
+            try:
+                self.game_name, self.normal_screenshot = self.get_random_game_screenshot()
+                break
+            except ValueError:
+                pass
+        self.pixel_size = 35 # Starting pixelation, dropped by -5 during setup
+        self.first_guess = True #Required for hangman setup
+        self.solved = False
+        self.pixelated_screenshot = None
+        self.pixelate_image() # Setups up the pixelated screenshot
 
     def get_random_game_screenshot(self) -> tuple[str, Image]:
         """Go the game's Steam page, grab it's title, check its tags, grab a random screenshots and put it in a pillow Image"""
@@ -80,9 +94,13 @@ class Screenshot:
         name = soup.select_one('#appHubAppName').get_text()
         #Clean up name
         try:
-            for grammar in '®™©,:;':
+            for grammar in '®™©,.:;?\'"-':
                 name = name.replace(grammar, '')
+            name = remove_roman_numerals(name)
             name = name.title()
+            for edition in ('Game Of The Year Edition','Definitive Edition','Complete Edition'):
+                name = name.replace(edition, '')
+            name = name.strip()
         except AttributeError:
             raise ValueError("Found a game that does not have a unique store page (taken off Steam store)")
 
@@ -90,15 +108,18 @@ class Screenshot:
         screenshots = [image['src'] for image in soup.select('img') if f'store_item_assets/steam/apps/{self.game_id}/' in image['src'] and '116x65.' in image['src']]
         random_high_res_link = random.choice(screenshots).replace('116x65','1920x1080')
         random_high_res_link = random_high_res_link[:random_high_res_link.index("?")] #Remove trailing '?t='
-        random_screenshot = Image.open(BytesIO(requests.get(random_high_res_link).content)).convert('RGB')
+        random_screenshot = Image.open(BytesIO(requests.get(random_high_res_link).content))
 
         return name, random_screenshot
 
-    def pixelate_image(self) -> Image:
+    def pixelate_image(self) -> None:
         """Downsides and the upsizes an Image"""
-        small_image = self.screenshot.resize((self.screenshot.width // self.pixel_size, self.screenshot.height // self.pixel_size), Image.BILINEAR)
-        pixelated_image = small_image.resize(self.screenshot.size, Image.NEAREST)
-        return pixelated_image
+        self.pixel_size -= 5
+        if self.pixel_size < 1:
+            self.pixel_size = 1
+        small_image = self.normal_screenshot.resize((self.normal_screenshot.width // self.pixel_size, self.normal_screenshot.height // self.pixel_size), Image.BILINEAR)
+        pixelated_image = small_image.resize(self.normal_screenshot.size, Image.NEAREST)
+        self.pixelated_screenshot = pixelated_image
 
 
 class MainWindow(QMainWindow):
@@ -110,10 +131,10 @@ class MainWindow(QMainWindow):
 
         self.button_submit_id = QPushButton("Submit", self)
         self.entry_steam_id = QLineEdit(self)
-        self.label_id_warning_and_welcome = QLabel("Try visiting 'https://www.steamidfinder.com/'",self)
+        self.label_id_warning_and_welcome = QLabel('Try visiting "https://www.steamidfinder.com/"',self)
         self.label_screenshot = QLabel(self)
         self.label_score = QLabel("Score: 0", self)
-        self.label_hangman = QLabel("_", self)
+        self.label_hangman = QLabel("", self)
         self.entry_game_name = QLineEdit(self)
         self.button_game_name = QPushButton("Submit", self)
         self.initUI()
@@ -125,24 +146,27 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
-        label_enter_id = QLabel("Enter your 17-Digit Alphanumeric Steam ID", self)
+        label_enter_id = QLabel("Enter your 17-Digit Steam ID", self)
         label_enter_id.setStyleSheet(default_css + "font-weight: bold;")
 
         self.button_submit_id.clicked.connect(self.submit_steam_id)
 
         # Image
         pixmap = QPixmap("question_marks.jpg") # Default local value
-        self.label_screenshot.setPixmap(pixmap)
+        scaled_pixmap = pixmap.scaled(720, 480, Qt.KeepAspectRatio)
+        self.label_screenshot.setPixmap(scaled_pixmap)
         self.label_screenshot.setScaledContents(True)
         #label_screenshot.setGeometry((self.width() - label_screenshot.width()) // 2,100, label_screenshot.width(), label_screenshot.height())
-
 
 
         label_question = QLabel("What is the name of the game this screenshot is from?", self)
 
         self.label_score.setStyleSheet(default_css + "color: green;")
 
+        self.entry_game_name.setDisabled(True)
+
         self.button_game_name.clicked.connect(self.guess_game_name)
+        self.button_game_name.setDisabled(True)
 
         # Apply generic, repeated traits. Like using a class in CSS
         for x in (label_enter_id, self.label_id_warning_and_welcome, label_question, self.label_score, self.label_hangman):
@@ -166,40 +190,117 @@ class MainWindow(QMainWindow):
 
     def submit_steam_id(self) -> None:
         """Tests for a valid player creation, then either sends back a warning or sets up the game."""
-        self.button_submit_id.setDisabled(True)
-        self.button_submit_id.setText("Processing...")
-
         try:
             self.player = Player(steam_id=self.entry_steam_id.text().upper().strip())
         except ValueError as e:
             self.label_id_warning_and_welcome.setStyleSheet(default_css + "color: red;")
             self.label_id_warning_and_welcome.setText(f"Warning: {e}")
-            self.button_submit_id.setText("Submit")
-            self.button_submit_id.setDisabled(False)
             return
+        player_username = self.player.player_name
+        print(f'Created player "{player_username}"')
         self.entry_steam_id.setDisabled(True)
-        self.button_submit_id.setText("Done!")
+        self.button_submit_id.setText("")
+        self.button_submit_id.setDisabled(True)
         self.label_id_warning_and_welcome.setStyleSheet(default_css + "font-weight: bold;")
-        self.label_id_warning_and_welcome.setText(f"Welcome {self.player.player_name}!")
+        self.label_id_warning_and_welcome.setText(f"Welcome {player_username}!")
 
+        self.entry_game_name.setDisabled(False)
+        self.button_game_name.setDisabled(False)
+
+        self.set_up_a_screenshot()
 
     def set_up_a_screenshot(self) -> None:
+        """Create a new screenshot, display it, and clear the text entry box"""
         self.screenshot = Screenshot(self.player.random_game_id())
+        print(f"The answer is {self.screenshot.game_name}") #Debugging
 
-        qt_image = ImageQt(self.screenshot.pixelated_screenshot) # TODO Dies here?
+        self.display_screenshot(pixelated=True)
 
+        # Clear text for proceeding rounds
+        self.entry_game_name.setText("")
+        self.label_hangman.setText("")
+        self.button_game_name.setText("Submit")
+
+    def display_screenshot(self, pixelated: bool) -> None:
+        """Reusable function for showing either a new step in the depixelization of the image or the answer."""
+        pillow_image = self.screenshot.pixelated_screenshot if pixelated else self.screenshot.normal_screenshot
+        byte_arr = io.BytesIO()
+        pillow_image.save(byte_arr, format='PNG')
+        byte_data = byte_arr.getvalue()
+        qt_image = QImage.fromData(byte_data)
+
+        # qt_image = ImageQt(self.screenshot.pixelated_screenshot) # Wasn't cooperative with temporary requests images
         pixmap = QPixmap.fromImage(qt_image)
-
-        self.label_screenshot.setPixmap(pixmap)
+        scaled_pixmap = pixmap.scaled(720, 480, Qt.KeepAspectRatio)
+        self.label_screenshot.setPixmap(scaled_pixmap)
         self.label_screenshot.setScaledContents(True)
 
-        set_up_hangman_spaces = ' '.join(['_' if x != ' ' else ' ' for x in self.screenshot.game_name])
-        self.label_hangman.setText(set_up_hangman_spaces)
+    def guess_game_name(self) -> None:
+        """Primary logic that tests your guess against answer, giving you hangman/pixelation hints as you make mistakes"""
+        if self.screenshot.solved:
+            self.set_up_a_screenshot()
+            return
+        player_guess = self.entry_game_name.text().lower().strip() if self.entry_game_name.text() else '' # Empty text box means a None value
+        game_name_lower = self.screenshot.game_name.lower()
 
-    def guess_game_name(self):
-        pass
+        #Fully guessed it right
+        if player_guess == game_name_lower:
+            #Add points, show full screenshot, ask to continue and then make a new screenshot
+            print("You guessed it right!")
+            self.screenshot.solved = True
+            new_score = int(self.label_score.text().replace('Score: ', '')) + self.screenshot.pixel_size
+            self.label_score.setText(f"Score: {new_score}")
+            self.label_hangman.setText(' '.join(x for x in self.screenshot.game_name))
+            self.display_screenshot(pixelated=False)
+            self.button_game_name.setText("Continue?") # Prep for next time this one button is pressed
+        else:
+            print("Nope, wrong answer")
+            # First wrong answer, reveal the hangman board
+            if self.screenshot.first_guess:
+                self.screenshot.first_guess = False
+                set_up_hangman_spaces = ' '.join(['_' if x != ' ' else ' ' for x in self.screenshot.game_name])
+                self.label_hangman.setText(set_up_hangman_spaces)
+
+            if player_guess in game_name_lower and player_guess != '': # You've guess a NEW part of the game's name
+                print(f'\tBut yes, "{player_guess}" is in "{game_name_lower}"')
+                for word in player_guess.split(" "):
+                    pass
+                    # TODO Add the substring(s) to the hangman
+            else:
+                current_hangman = self.label_hangman.text()
+                complete_hangman = ' '.join(x for x in self.screenshot.game_name)
+                print("Completed hangman: ", complete_hangman)
+                print("Current hangman: ", current_hangman)
+
+                # TODO Find an available underscore to give a new letter to
+                # random_index = random.randint(0,len(current_hangman)-1)
+                # while current_hangman[random_index] != '_' and steps < len(game_name_lower):
+                #     random_index = random.randint(0, len(current_hangman) - 1)
+                # current_hangman[random_index] = complete_hangman[current_hangman]
+
+                print("Current hangman After: ", current_hangman)
+
+                self.label_hangman.setText(current_hangman)
+            # Decrease the blur of the pixel
+            self.screenshot.pixelate_image()
+            self.display_screenshot(pixelated=True)
 
 
+
+def remove_roman_numerals(name: str) -> str:
+    """A precautionary function to prevent confusion with Dark Souls 3 vs Dark Souls III. Borrowed code."""
+    # Match Roman numerals using a regex
+    roman_numeral_pattern = r'\bM{0,4}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})\b'
+
+    def convert_match_to_int(match):
+        roman_numeral = match.group(0)
+        try:
+            return str(roman.fromRoman(roman_numeral))
+        except roman.InvalidRomanNumeralError:
+            return roman_numeral  # Return the original text if it's not valid
+
+    # Replace Roman numerals in the title
+    return re.sub(roman_numeral_pattern, convert_match_to_int, name)
 
 
 
