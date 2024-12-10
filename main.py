@@ -74,7 +74,7 @@ class Screenshot:
             except ValueError:
                 pass
         self.pixel_size = 35 # Starting pixelation, dropped by -5 during setup
-        self.turn_counter = 0 #Required for hinting hangman length
+        self.first_turn = True #Required for hinting hangman length after the first chance to guess it
         self.solved = False
         self.pixelated_screenshot = None
         self.pixelate_image() # Setups up the pixelated screenshot
@@ -263,9 +263,9 @@ class MainWindow(QMainWindow):
         print("Current Corrected Hangman Before:", current_hangman_corrected)
 
         # After the first answer, as long as no letter were guessed, reveal the hangman board
-        if self.screenshot.turn_counter == 0:
+        if self.screenshot.first_turn:
             self.label_hangman.setText(' '.join(['_' if x != ' ' else '' for x in self.screenshot.game_name]))
-        self.screenshot.turn_counter += 1
+        self.screenshot.first_turn = False
 
         # If the entered string was a substring, add it to the hangman, unless it's already been found
         if player_guess and player_guess in game_name_lower and not player_guess in current_hangman_corrected.lower():
