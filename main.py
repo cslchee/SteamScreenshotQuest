@@ -1,6 +1,5 @@
 import requests, json, random, sys, io, roman, re
 from PIL import Image
-from PIL.ImageQt import ImageQt
 from dotenv import load_dotenv
 from os import getenv
 from bs4 import BeautifulSoup
@@ -34,6 +33,7 @@ class Player:
         self.steam_games_ids = self.get_player_steam_games()
 
     def get_player_name(self) -> str:
+        # TODO What if the Steam Account is set to private?
         player_info_url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={self.steam_id}&format=json"
         soup = BeautifulSoup(requests.get(player_info_url).text, "html.parser")
         try:
@@ -74,7 +74,7 @@ class Screenshot:
             except ValueError:
                 pass
         self.pixel_size = 35 # Starting pixelation, dropped by -5 during setup
-        self.first_guess = True #Required for hangman setup
+        self.turn_counter = 0 #Required for hinting hangman length
         self.solved = False
         self.pixelated_screenshot = None
         self.pixelate_image() # Setups up the pixelated screenshot
@@ -94,7 +94,7 @@ class Screenshot:
         name = soup.select_one('#appHubAppName').get_text()
         #Clean up name
         try:
-            for grammar in '®™©,.:;?\'"-':
+            for grammar in '®™©,.:;?\'"-()[]{}':
                 name = name.replace(grammar, '')
             name = remove_roman_numerals(name)
             name = name.title()
@@ -235,53 +235,81 @@ class MainWindow(QMainWindow):
         self.label_screenshot.setPixmap(scaled_pixmap)
         self.label_screenshot.setScaledContents(True)
 
+    def correct_answer(self):
+        # Add points, show full screenshot, ask to continue and then make a new screenshot
+        print("You guessed it right!")
+        self.screenshot.solved = True
+        new_score = int(self.label_score.text().replace('Score: ', '')) + self.screenshot.pixel_size
+        self.label_score.setText(f"Score: {new_score}")
+        self.label_hangman.setText(' '.join(x for x in self.screenshot.game_name))
+        self.display_screenshot(pixelated=False)
+        self.button_game_name.setText("Continue?")  # Prep for next time this one button is pressed
+
     def guess_game_name(self) -> None:
         """Primary logic that tests your guess against answer, giving you hangman/pixelation hints as you make mistakes"""
         if self.screenshot.solved:
             self.set_up_a_screenshot()
             return
+
         player_guess = self.entry_game_name.text().lower().strip() if self.entry_game_name.text() else '' # Empty text box means a None value
         game_name_lower = self.screenshot.game_name.lower()
 
-        #Fully guessed it right
+        # Fully guessed it right inside the box
         if player_guess == game_name_lower:
-            #Add points, show full screenshot, ask to continue and then make a new screenshot
-            print("You guessed it right!")
-            self.screenshot.solved = True
-            new_score = int(self.label_score.text().replace('Score: ', '')) + self.screenshot.pixel_size
-            self.label_score.setText(f"Score: {new_score}")
-            self.label_hangman.setText(' '.join(x for x in self.screenshot.game_name))
-            self.display_screenshot(pixelated=False)
-            self.button_game_name.setText("Continue?") # Prep for next time this one button is pressed
+            self.correct_answer()
+            return
+
+        current_hangman_corrected = ''.join([letter if letter else ' ' for letter in self.label_hangman.text().split(' ')])
+        print("Current Corrected Hangman Before:", current_hangman_corrected)
+
+        # After the first answer, as long as no letter were guessed, reveal the hangman board
+        if self.screenshot.turn_counter == 0:
+            self.label_hangman.setText(' '.join(['_' if x != ' ' else '' for x in self.screenshot.game_name]))
+        self.screenshot.turn_counter += 1
+
+        # If the entered string was a substring, add it to the hangman, unless it's already been found
+        if player_guess and player_guess in game_name_lower and not player_guess in current_hangman_corrected.lower():
+            # Get the index(es) of the substring
+            occurrences = []
+            start_index = 0
+            while True:
+                index = game_name_lower.find(player_guess, start_index)
+                if index == -1:
+                    break
+                occurrences.append(index)
+                start_index = index + 1
+            print(f"'{player_guess}' is a NEW substring as indexes {occurrences}")
+
+            # Copy in the indexes of the correctly-guess substring
+            added_hangman = ""
+            index = 0
+            while index < len(self.screenshot.game_name):
+                print(index)
+                within_range = False
+                for o in occurrences:
+                    if o <= index <= o + len(player_guess) - 1:
+                        within_range = True
+                        break
+                if within_range:
+                    added_hangman += self.screenshot.game_name[index]
+                else:
+                    added_hangman += current_hangman_corrected[index]
+                index += 1
+
+        # Grab it all again to compare for 'correct answer' section
+        current_hangman_corrected = ''.join([letter if letter else ' ' for letter in self.label_hangman.text().split(' ')])
+        print("Current Corrected Hangman After:", current_hangman_corrected)
+
+        #Got enough substrings to complete the hangman
+        if current_hangman_corrected == self.screenshot.game_name:
+            self.correct_answer()
+            return
         else:
-            print("Nope, wrong answer")
-            # First wrong answer, reveal the hangman board
-            if self.screenshot.first_guess:
-                self.screenshot.first_guess = False
-                set_up_hangman_spaces = ' '.join(['_' if x != ' ' else ' ' for x in self.screenshot.game_name])
-                self.label_hangman.setText(set_up_hangman_spaces)
-
-            if player_guess in game_name_lower and player_guess != '': # You've guess a NEW part of the game's name
-                print(f'\tBut yes, "{player_guess}" is in "{game_name_lower}"')
-                for word in player_guess.split(" "):
-                    pass
-                    # TODO Add the substring(s) to the hangman
-            else:
-                current_hangman = self.label_hangman.text()
-                complete_hangman = ' '.join(x for x in self.screenshot.game_name)
-                print("Completed hangman: ", complete_hangman)
-                print("Current hangman: ", current_hangman)
-
-                # TODO Find an available underscore to give a new letter to
-                # random_index = random.randint(0,len(current_hangman)-1)
-                # while current_hangman[random_index] != '_' and steps < len(game_name_lower):
-                #     random_index = random.randint(0, len(current_hangman) - 1)
-                # current_hangman[random_index] = complete_hangman[current_hangman]
-
-                print("Current hangman After: ", current_hangman)
-
-                self.label_hangman.setText(current_hangman)
             # Decrease the blur of the pixel
+            print("Nope, wrong answer, reducing pixelation")
+
+            # TODO Add a random letter to the hangman
+
             self.screenshot.pixelate_image()
             self.display_screenshot(pixelated=True)
 
