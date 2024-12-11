@@ -73,8 +73,10 @@ class Screenshot:
                 break
             except ValueError:
                 pass
-        self.pixel_size = 40 # Starting pixelation, dropped by -5 during setup
-        self.first_turn = True #Required for hinting hangman length after the first chance to guess it
+        self.starting_pixel_size = 50 # Used for percentage of final round score. Constant.
+        self.pixel_size_decrease = 10 # Also used for percentage of final score. Constant.
+        self.pixel_size = self.starting_pixel_size # The pixelation value that changes while the game is playing.
+        self.turn_counter = 0 #Required for hinting hangman
         self.solved = False
         self.pixelated_screenshot = None
         self.pixelate_image() # Setups up the pixelated screenshot
@@ -98,7 +100,8 @@ class Screenshot:
                 name = name.replace(grammar, '')
             name = remove_roman_numerals(name)
             name = name.title()
-            for edition in ('Game Of The Year Edition','Definitive Edition','Complete Edition'):
+            name = name.replace('&', 'and')
+            for edition in ('Game Of The Year Edition','Definitive Edition','Complete Edition', 'Ultimate Edition'):
                 name = name.replace(edition, '')
             name = name.strip()
         except AttributeError:
@@ -114,7 +117,8 @@ class Screenshot:
 
     def pixelate_image(self) -> None:
         """Downsides and the upsizes an Image"""
-        self.pixel_size -= 5
+        if self.turn_counter != 0: # Don't initially remove pixel size on the first turn
+            self.pixel_size -= self.pixel_size_decrease
         if self.pixel_size < 1:
             self.pixel_size = 1
         small_image = self.normal_screenshot.resize((self.normal_screenshot.width // self.pixel_size, self.normal_screenshot.height // self.pixel_size), Image.BILINEAR)
@@ -238,12 +242,13 @@ class MainWindow(QMainWindow):
         self.label_screenshot.setPixmap(scaled_pixmap)
         self.label_screenshot.setScaledContents(True)
 
-    def correct_answer(self):
-        # Add points, show full screenshot, ask to continue and then make a new screenshot
-        print("The game is over!")
+    def round_ended(self, won=True):
+        """Add points, show full screenshot, ask to continue and then make a new screenshot"""
+        print("This round is complete!")
         self.screenshot.solved = True
         # Give points based on the remaining pixel size of the screenshot. A pixel size of '1' (normal resolution) means 0 points
-        new_score = 0 if self.screenshot.pixel_size == 1 else int(self.label_score.text().replace('Score: ', '')) + self.screenshot.pixel_size
+        calculated_score = int(100 * (self.screenshot.pixel_size / self.screenshot.starting_pixel_size)) if won else 0 # A percentage of 50 points based on the
+        new_score = int(self.label_score.text().replace('Score: ', '')) + calculated_score
         self.label_score.setText(f"Score: {new_score}")
         self.label_hangman.setText(' '.join(x for x in self.screenshot.game_name))
         self.display_screenshot(pixelated=False)
@@ -259,7 +264,7 @@ class MainWindow(QMainWindow):
         game_name_lower = self.screenshot.game_name.lower()
 
         current_hangman_corrected = ''.join([letter if letter else ' ' for letter in self.label_hangman.text().split(' ')])
-        print(f'Current Hangman Corrected: "{current_hangman_corrected}"')
+        #print(f'Current Hangman Corrected: "{current_hangman_corrected}"')
 
         """
             Win condition:
@@ -268,37 +273,66 @@ class MainWindow(QMainWindow):
                 OR ran out of characters to add to the hangman
                 OR run out have the image completely depixelate 
         """
-        if player_guess == game_name_lower or current_hangman_corrected == self.screenshot.game_name or self.screenshot.pixel_size == 1:
-            self.correct_answer()
+        if player_guess == game_name_lower:
+            self.round_ended(won=True)
+            return
+        elif current_hangman_corrected == self.screenshot.game_name or self.screenshot.pixel_size == 1:
+            self.round_ended(won=False)
             return
 
         # After the first answer, as long as no letter were guessed, reveal the hangman board
-        if self.screenshot.first_turn:
+        if self.screenshot.turn_counter == 0:
             self.label_hangman.setText(' '.join(['_' if x != ' ' else '' for x in self.screenshot.game_name]))
 
         #Wrong answer/hint needed, reducing pixelation, show a new letter if the hangman board is up (after first mistake)
-        if not self.screenshot.first_turn:
-            # TODO If it's the first time showing a letter, show the first letter of each word.
-            vowels_and_consonants = ('aeiou','aeiou','bcdfghjklmnpqrstvwxyz') # 66% chance to get a vowel/consonant
-            pick_a_letter = random.choice(random.choice(vowels_and_consonants))
-            # Keep picking a letter until you get a new one that's in the game_name but not the current known letters
-            while pick_a_letter in current_hangman_corrected or pick_a_letter not in game_name_lower:
-                pick_a_letter = random.choice(random.choice(vowels_and_consonants))
-            print(f"Picking the letter '{pick_a_letter}'")
+        if self.screenshot.turn_counter > 0:
+            def add_letters_to_hangman(new_letters: list[str]) -> str:
+                """Add all instances of a letter(s) (upper and lower) to the hangman"""
+                the_hangman = ""
+                for index in range(len(game_name_lower)):
+                    if game_name_lower[index] in new_letters:
+                        the_hangman += self.screenshot.game_name[index]  # Accommodates upper/lower cases
+                    else:
+                        the_hangman += current_hangman_corrected[index]  # Get the other letters and underscores
+                print("New hangman: ", the_hangman)
+                return the_hangman
 
-            #Add all instances of that letter (upper and lower) to the hangman
-            new_hangman = ""
-            print(len(current_hangman_corrected), len(game_name_lower))
-            for index in range(len(game_name_lower)):
-                if game_name_lower[index] == pick_a_letter:
-                    new_hangman += self.screenshot.game_name[index] # Accommodates upper/lower cases
-                else:
-                    new_hangman += current_hangman_corrected[index] # Get the other letters and underscores
-            print("New hangman: ", new_hangman)
+            # On the turn after the empty hangman is revealed, display the first letters of each word
+            if self.screenshot.turn_counter == 1:
+                first_letters = [x[0] for x in game_name_lower.split(" ")]
+                print("Showing first letters: ", first_letters)
+                new_hangman = add_letters_to_hangman(first_letters)
+            else:
+                # On every turn after the first letters of each work are revealed, add a stray letter or two
+                vowels_and_consonants = ('aeiou','aeiou','bcdfghjklmnpqrstvwxyz') # 66% chance to get a vowel/consonant
+                letter_set = []
+
+                def pick_an_unused_letter() -> str:
+                    pick_a_letter = random.choice(random.choice(vowels_and_consonants))
+                    print(f"Picking the letter... {pick_a_letter}", end='')
+
+                    # Keep picking a letter until you get a new one that's in the game_name but not the current known letters
+                    loop_protection = 0 # In case there's trouble randomly narrowing down that last letter
+                    while pick_a_letter in current_hangman_corrected.lower() or pick_a_letter not in game_name_lower or pick_a_letter in letter_set:
+                        pick_a_letter = random.choice(random.choice(vowels_and_consonants))
+                        print(f" -> {pick_a_letter}", end='')
+                        if loop_protection > 26:
+                            print('Break', end='')
+                            break
+                        loop_protection += 1
+                    print()
+                    return pick_a_letter
+
+                # Add more than one letter if the number of _'s in the current hangman is higher
+                for x in range(2 if current_hangman_corrected.count("_") > 6 else 1):
+                    letter_set.append(pick_an_unused_letter())
+
+                new_hangman = add_letters_to_hangman(letter_set)
+
 
             self.label_hangman.setText(' '.join([x if x != ' ' else '' for x in new_hangman]))
 
-        self.screenshot.first_turn = False
+        self.screenshot.turn_counter += 1
 
         self.screenshot.pixelate_image()
         self.display_screenshot(pixelated=True)
