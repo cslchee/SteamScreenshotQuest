@@ -21,7 +21,7 @@ class Player:
     def __init__(self, steam_id: str):
         if not steam_id and DEFAULT_STEAM_ID is None:
             raise ValueError("You've entered an invalid Steam ID. No default value specified in .env file.")
-        elif not steam_id and DEFAULT_STEAM_ID is not None:
+        elif not steam_id and DEFAULT_STEAM_ID is not None: # Set default the steam key from .env
             steam_id = DEFAULT_STEAM_ID
         if len(steam_id) != 17 or not steam_id.isalnum():
             raise ValueError(f"You've entered an invalid Steam ID.\nCheck the length and make sure it's numeric.")
@@ -31,15 +31,18 @@ class Player:
         self.points = 0
         self.player_name = self.get_player_name()
         self.steam_games_ids = self.get_player_steam_games()
+        print("PANG")
 
     def get_player_name(self) -> str:
-        # TODO What if the Steam Account is set to private?
         player_info_url = f"http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key={STEAM_API_KEY}&steamids={self.steam_id}&format=json"
         soup = BeautifulSoup(requests.get(player_info_url).text, "html.parser")
         try:
-            return json.loads(soup.text)['response']['players'][0]['personaname']
+            data = json.loads(soup.text)
         except Exception:
             raise ValueError("Could not talk to the Steam API. Is your key valid/correct?")
+        if not data['response']['players']:
+            raise ValueError("Error with retrieving Steam Profile. Likely an invalid ID.")
+        return data['response']['players'][0]['personaname']
 
 
     def get_player_steam_games(self) -> list[int]:
@@ -47,12 +50,18 @@ class Player:
         if STEAM_API_KEY is None:
             raise ValueError("No Steam API Key provided in the .env file.")
         player_games_url = f"http://api.steampowered.com/IPlayerService/GetOwnedGames/v0001/?key={STEAM_API_KEY}&steamid={self.steam_id}&format=json"
+        print(player_games_url)
         soup = BeautifulSoup(requests.get(player_games_url).text, "html.parser")
+        data = json.loads(soup.text)
+        if data['response'] == {}:
+            raise ValueError("This profile is private and their Steam games cannot be viewed.")
+            # Hypothesis - You can still access the friends-only private profiles of accounts tied to you and therefore your API key
         try:
-            data = json.loads(soup.text)['response']['games']
+            data_games = data['response']['games']
         except KeyError:
             raise ValueError(f"You've entered an invalid Steam ID. Player ID does not exist.") # Already tested for valid API in get_player_name
-        data_ids = [game['appid'] for game in data if game['playtime_forever'] > 15] # Grab game ideas, ignore unplayed games
+
+        data_ids = [game['appid'] for game in data_games if game['playtime_forever'] > 15] # Grab game ideas, ignore unplayed games
         # print(json.dumps(data_ids, indent=3))
         return data_ids
 
